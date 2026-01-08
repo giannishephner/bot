@@ -1,89 +1,89 @@
-# Попробуем разные варианты API
-cat > src/find-15m. ts << 'EOF'
-async function find15mMarkets() {
-    console.log("🔍 Ищем 15-минутные рынки.. .\n");
+cat > src/find-btc-15m.ts << 'EOF'
+async function findBtc15m() {
+    console.log("🔍 Ищем BTC 15-минутные рынки.. .\n");
 
-    const endpoints = [
-        // Разные варианты endpoints
-        "https://gamma-api.polymarket.com/markets? limit=100&order=endDate&ascending=true&closed=false",
-        "https://gamma-api.polymarket. com/markets?limit=100&_sort=created_at: desc",
-        "https://gamma-api.polymarket.com/events?limit=100&active=true&closed=false",
-        "https://gamma-api.polymarket.com/markets?tag=crypto&limit=100",
-        "https://gamma-api.polymarket.com/events?tag=crypto&limit=100",
-        
-        // Strapi endpoints (старый API)
-        "https://strapi-matic.poly.market/markets?_limit=50&active=true",
-        
-        // Попробуем с другими параметрами
-        "https://gamma-api.polymarket.com/markets?active=true&closed=false&order=volume&limit=50",
-        "https://gamma-api.polymarket.com/events?active=true&closed=false&_limit=50",
-    ];
+    const res = await fetch(
+        "https://gamma-api.polymarket.com/markets? active=true&closed=false&order=volume&limit=200"
+    );
+    const markets = await res.json() as any[];
 
-    for (const url of endpoints) {
-        console.log(`\n📡 ${url}`);
-        try {
-            const res = await fetch(url);
-            if (!res.ok) {
-                console. log(`   ❌ HTTP ${res.status}`);
-                continue;
-            }
-            const data = await res.json() as any[];
-            
-            if (! Array.isArray(data)) {
-                console.log(`   Не массив:  ${JSON.stringify(data).substring(0, 100)}`);
-                continue;
-            }
+    console.log(`Всего активных рынков:  ${markets.length}\n`);
 
-            console.log(`   ✅ Результатов: ${data. length}`);
-            
-            // Показываем первые 3
-            data.slice(0, 3).forEach((item:  any, i: number) => {
-                const title = item.question || item.title || item.slug || "N/A";
-                const date = item.endDate || item.created_at || "";
-                console.log(`   ${i+1}. ${title. substring(0, 50)}... (${date})`);
-            });
+    // Фильтруем крипто up/down рынки
+    const cryptoUpDown = markets. filter((m: any) => {
+        const slug = (m.slug || "").toLowerCase();
+        const question = (m.question || "").toLowerCase();
+        return slug. includes("updown") || slug.includes("up-down") ||
+               question.includes("up or down");
+    });
 
-            // Ищем что-то связанное с 15min/btc/updown
-            const relevant = data.filter((m: any) => {
-                const text = JSON.stringify(m).toLowerCase();
-                return text.includes("15") || text.includes("minute") || 
-                       text. includes("updown") || text.includes("up-down");
-            });
+    console.log(`Крипто Up/Down рынков: ${cryptoUpDown.length}\n`);
 
-            if (relevant.length > 0) {
-                console.log(`\n   🎯 Найдено ${relevant.length} релевантных! `);
-                relevant.slice(0, 2).forEach((m: any) => {
-                    console.log(`   - ${m.question || m.title || m.slug}`);
-                    console.log(`     slug: ${m.slug}`);
-                });
-            }
+    // Группируем по типу (BTC, ETH, SOL)
+    const btcMarkets = cryptoUpDown.filter((m: any) => 
+        m.slug?. includes("btc") || m.question?.toLowerCase().includes("bitcoin")
+    );
+    const ethMarkets = cryptoUpDown.filter((m: any) => 
+        m.slug?.includes("eth") || m.question?.toLowerCase().includes("ethereum")
+    );
+    const solMarkets = cryptoUpDown.filter((m: any) => 
+        m. slug?.includes("sol") || m.question?.toLowerCase().includes("solana")
+    );
 
-        } catch (e:  any) {
-            console.log(`   ❌ Error:  ${e.message}`);
-        }
+    console.log(`BTC рынков: ${btcMarkets.length}`);
+    console.log(`ETH рынков: ${ethMarkets.length}`);
+    console.log(`SOL рынков: ${solMarkets.length}\n`);
+
+    // Показываем BTC рынки
+    console.log("=== BTC Up/Down рынки ===\n");
+    btcMarkets.slice(0, 10).forEach((m: any, i: number) => {
+        console. log(`${i+1}. ${m.question}`);
+        console.log(`   slug: ${m.slug}`);
+        console.log(`   endDate: ${m.endDate}`);
+        console.log(`   outcomes: ${m.outcomes}`);
+        console.log(`   prices: ${m.outcomePrices}`);
+        console.log(`   tokenIds: ${m.clobTokenIds}`);
+        console.log();
+    });
+
+    // Если нет BTC, показываем ETH
+    if (btcMarkets.length === 0) {
+        console.log("❌ BTC рынки не найдены.  Показываем ETH:\n");
+        ethMarkets.slice(0, 5).forEach((m: any, i: number) => {
+            console.log(`${i+1}.  ${m.question}`);
+            console. log(`   slug: ${m.slug}`);
+            console. log(`   endDate: ${m.endDate}`);
+            console.log(`   prices: ${m.outcomePrices}`);
+            console. log(`   tokenIds: ${m.clobTokenIds}`);
+            console.log();
+        });
     }
 
-    // Проверим что есть на странице polymarket. com/crypto/15M
-    console.log("\n\n🌐 Пробуем получить данные как браузер.. .");
-    try {
-        const res = await fetch("https://polymarket.com/api/markets?category=crypto", {
-            headers:  {
-                "User-Agent": "Mozilla/5.0",
-                "Accept":  "application/json"
-            }
-        });
-        console.log(`   Status: ${res.status}`);
-        if (res.ok) {
-            const text = await res.text();
-            console. log(`   Response: ${text.substring(0, 300)}`);
-        }
-    } catch (e:  any) {
-        console.log(`   ❌ ${e.message}`);
+    // Показываем ближайший рынок к истечению
+    const now = Date.now();
+    const upcoming = cryptoUpDown
+        .filter((m: any) => new Date(m.endDate).getTime() > now)
+        .sort((a: any, b: any) => 
+            new Date(a.endDate).getTime() - new Date(b.endDate).getTime()
+        );
+
+    if (upcoming.length > 0) {
+        console.log("\n=== Ближайший активный рынок ===\n");
+        const m = upcoming[0];
+        const timeLeft = Math.round((new Date(m.endDate).getTime() - now) / 1000 / 60);
+        console.log(`${m.question}`);
+        console.log(`До истечения: ${timeLeft} минут`);
+        console.log(`slug: ${m.slug}`);
+        console.log(`outcomes: ${m.outcomes}`);
+        console.log(`prices: ${m.outcomePrices}`);
+        console.log(`tokenIds: ${m.clobTokenIds}`);
+        console.log(`\nПолные данные:`);
+        console.log(JSON.stringify(m, null, 2));
     }
 }
 
-find15mMarkets();
+findBtc15m();
 EOF
 
-npx tsc src/find-15m.ts --outDir dist --esModuleInterop --skipLibCheck --module CommonJS --target ES2020
-node dist/find-15m.js
+npx tsc src/find-btc-15m.ts --outDir dist --esModuleInterop --skipLibCheck --module CommonJS --target ES2020
+node dist/find-btc-15m. js
