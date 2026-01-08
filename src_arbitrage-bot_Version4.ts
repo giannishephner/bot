@@ -1,6 +1,6 @@
 /**
- * Polymarket 15-MIN Crypto Arbitrage Bot
- * Использует правильный API endpoint:  /markets/slug/{asset}-updown-15m-{timestamp}
+ * Polymarket 15-MIN Crypto Arbitrage Bot v2
+ * С улучшенной стратегией
  */
 
 import { ClobClient, Side, OrderType, Chain } from "@polymarket/clob-client";
@@ -21,27 +21,31 @@ interface BotConfig {
     privateKey: string;
     funderAddress: string;
     signatureType: 0 | 1;
-    minEdgePercent: number;
+    minEdgePercent:  number;
     betSizeUsdc: number;
     momentumWindowSeconds: number;
     momentumThresholdPercent: number;
-    cooldownSeconds: number;
+    cooldownSeconds:  number;
     asset: "btc" | "eth" | "sol" | "xrp";
 }
 
 const botConfig: BotConfig = {
     polymarketHost: "https://clob.polymarket. com",
-    gammaApiHost: "https://gamma-api.polymarket.com",
+    gammaApiHost: "https://gamma-api.polymarket. com",
     chainId: 137 as Chain,
     privateKey: process. env.PRIVATE_KEY || "",
-    funderAddress: process.env.FUNDER_ADDRESS || "",
+    funderAddress: process.env. FUNDER_ADDRESS || "",
     signatureType: 1,
-    minEdgePercent:  5. 0,
-    betSizeUsdc:  50,
-    momentumWindowSeconds: 30,
-    momentumThresholdPercent: 0.15,
-    cooldownSeconds: 60,
-    asset:  "btc",
+    
+    // ========== НАСТРОЙКИ СТРАТЕГИИ ==========
+    minEdgePercent: 2.0,              // Минимальный edge для входа (было 5%)
+    betSizeUsdc:  50,                  // Размер ставки
+    momentumWindowSeconds: 60,         // Окно анализа (было 30 сек)
+    momentumThresholdPercent: 0.05,   // Порог моментума (было 0.15%)
+    cooldownSeconds: 30,               // Пауза между сделками
+    // =========================================
+    
+    asset: "btc",
 };
 
 // ============== BINANCE PRICE FEED ==============
@@ -54,17 +58,17 @@ interface PricePoint {
 class BinancePriceFeed {
     private ws: WebSocket | null = null;
     private prices: PricePoint[] = [];
-    private wsUrl: string;
+    private wsUrl:  string;
     private reconnectAttempts = 0;
 
     constructor(asset: string = "btc") {
         const symbol = asset.toLowerCase() + "usdt";
-        this.wsUrl = `wss://stream.binance.com:9443/ws/${symbol}@trade`;
+        this. wsUrl = `wss://stream.binance.com:9443/ws/${symbol}@trade`;
     }
 
     async connect(): Promise<void> {
         return new Promise((resolvePromise, reject) => {
-            this.ws = new WebSocket(this.wsUrl);
+            this.ws = new WebSocket(this. wsUrl);
 
             this.ws. on("open", () => {
                 console.log(`✅ Binance WebSocket подключён`);
@@ -74,21 +78,19 @@ class BinancePriceFeed {
 
             this.ws.on("message", (data:  WebSocket.Data) => {
                 try {
-                    const trade = JSON.parse(data.toString());
+                    const trade = JSON.parse(data. toString());
                     const price = parseFloat(trade.p);
                     const timestamp = Date.now();
                     this.prices.push({ timestamp, price });
 
-                    const cutoff = timestamp - 300000;
-                    this. prices = this.prices.filter(p => p.timestamp > cutoff);
+                    // Храним 10 минут данных
+                    const cutoff = timestamp - 600000;
+                    this.prices = this. prices.filter(p => p.timestamp > cutoff);
                 } catch (e) {}
             });
 
-            this.ws.on("error", (error) => {
-                reject(error);
-            });
-
-            this. ws.on("close", () => {
+            this.ws.on("error", reject);
+            this.ws.on("close", () => {
                 if (this. reconnectAttempts < 10) {
                     this.reconnectAttempts++;
                     setTimeout(() => this.connect(), 5000);
@@ -98,15 +100,16 @@ class BinancePriceFeed {
     }
 
     getCurrentPrice(): number | null {
-        if (this. prices.length === 0) return null;
+        if (this.prices.length === 0) return null;
         return this.prices[this.prices.length - 1].price;
     }
 
+    // Моментум:  изменение цены за период
     calculateMomentum(windowSeconds: number): number | null {
         if (this.prices. length < 2) return null;
 
-        const currentTime = Date.now();
-        const cutoff = currentTime - windowSeconds * 1000;
+        const now = Date.now();
+        const cutoff = now - windowSeconds * 1000;
 
         const pastPrices = this.prices.filter(p => p.timestamp <= cutoff);
         if (pastPrices.length === 0) return null;
@@ -115,6 +118,37 @@ class BinancePriceFeed {
         const currentPrice = this.prices[this.prices. length - 1]. price;
 
         return ((currentPrice - pastPrice) / pastPrice) * 100;
+    }
+
+    // Волатильность: стандартное отклонение цены
+    calculateVolatility(windowSeconds: number): number | null {
+        const now = Date.now();
+        const cutoff = now - windowSeconds * 1000;
+        const recentPrices = this.prices.filter(p => p. timestamp > cutoff);
+
+        if (recentPrices. length < 10) return null;
+
+        const prices = recentPrices.map(p => p.price);
+        const mean = prices.reduce((a, b) => a + b, 0) / prices.length;
+        const variance = prices.reduce((sum, p) => sum + Math.pow(p - mean, 2), 0) / prices.length;
+        
+        return (Math.sqrt(variance) / mean) * 100;
+    }
+
+    // Тренд: сравниваем несколько периодов
+    calculateTrend(): { short: number | null; medium: number | null; direction: string } {
+        const short = this.calculateMomentum(30);  // 30 сек
+        const medium = this.calculateMomentum(120); // 2 мин
+
+        let direction = "NEUTRAL";
+        if (short !== null && medium !== null) {
+            if (short > 0 && medium > 0) direction = "STRONG_UP";
+            else if (short < 0 && medium < 0) direction = "STRONG_DOWN";
+            else if (short > 0) direction = "WEAK_UP";
+            else if (short < 0) direction = "WEAK_DOWN";
+        }
+
+        return { short, medium, direction };
     }
 
     disconnect(): void {
@@ -128,23 +162,16 @@ class BinancePriceFeed {
 // ============== 15-MIN MARKET CALCULATOR ==============
 
 class MarketCalculator {
-    /**
-     * Вычисляет timestamp для текущего/следующего 15-минутного окна
-     * Рынки начинаются каждые 15 минут:  : 00, :15, :30, :45
-     */
-    static get15MinTimestamps(): { current: number; next:  number } {
+    static get15MinTimestamps(): { current: number; next: number } {
         const now = Math.floor(Date. now() / 1000);
         const minutes = Math.floor((now % 3600) / 60);
         const currentSlot = Math.floor(minutes / 15) * 15;
         
-        // Текущее 15-минутное окно
         const hourStart = now - (now % 3600);
         const currentTimestamp = hourStart + currentSlot * 60;
-        
-        // Следующее окно
         const nextTimestamp = currentTimestamp + 15 * 60;
         
-        return { current: currentTimestamp, next: nextTimestamp };
+        return { current: currentTimestamp, next:  nextTimestamp };
     }
 
     static formatSlug(asset: string, timestamp: number): string {
@@ -153,11 +180,11 @@ class MarketCalculator {
 
     static getTimeLeft(endTimestamp: number): string {
         const now = Math.floor(Date.now() / 1000);
-        const secondsLeft = endTimestamp + 15 * 60 - now; // +15 мин = конец окна
+        const secondsLeft = endTimestamp + 15 * 60 - now;
         
         if (secondsLeft <= 0) return "Истёк";
         
-        const minutes = Math.floor(secondsLeft / 60);
+        const minutes = Math. floor(secondsLeft / 60);
         const seconds = secondsLeft % 60;
         return `${minutes}м ${seconds}с`;
     }
@@ -171,7 +198,7 @@ interface Market15m {
     slug: string;
     conditionId: string;
     upTokenId: string;
-    downTokenId:  string;
+    downTokenId: string;
     upPrice: number;
     downPrice: number;
     endTimestamp: number;
@@ -184,30 +211,24 @@ class GammaApiClient {
     async getMarketBySlug(slug:  string): Promise<Market15m | null> {
         try {
             const res = await fetch(`${this.host}/markets/slug/${slug}`);
-            
-            if (!res. ok) {
-                return null;
-            }
+            if (!res.ok) return null;
 
             const m = await res.json() as any;
 
-            // Парсим tokenIds
-            let tokenIds: string[] = [];
+            let tokenIds:  string[] = [];
             try {
                 tokenIds = typeof m.clobTokenIds === "string"
                     ? JSON.parse(m. clobTokenIds)
                     : m.clobTokenIds || [];
             } catch {}
 
-            // Парсим цены
-            let prices: number[] = [0. 5, 0.5];
+            let prices: number[] = [0.5, 0.5];
             try {
                 prices = typeof m.outcomePrices === "string"
                     ? JSON.parse(m.outcomePrices).map((p: string) => parseFloat(p))
-                    : m.outcomePrices?.map((p: string) => parseFloat(p)) || [0.5, 0.5];
+                    : m.outcomePrices?. map((p: string) => parseFloat(p)) || [0.5, 0.5];
             } catch {}
 
-            // Извлекаем timestamp из slug
             const timestampMatch = slug.match(/(\d{10})$/);
             const endTimestamp = timestampMatch ? parseInt(timestampMatch[1]) : 0;
 
@@ -223,7 +244,7 @@ class GammaApiClient {
                 endTimestamp,
                 active: m.active && ! m.closed,
             };
-        } catch (error) {
+        } catch {
             return null;
         }
     }
@@ -231,19 +252,13 @@ class GammaApiClient {
     async getCurrentMarket(asset: string): Promise<Market15m | null> {
         const { current, next } = MarketCalculator.get15MinTimestamps();
         
-        // Пробуем текущий рынок
         const currentSlug = MarketCalculator.formatSlug(asset, current);
-        let market = await this. getMarketBySlug(currentSlug);
+        let market = await this.getMarketBySlug(currentSlug);
         
-        if (market && market.active) {
-            return market;
-        }
+        if (market && market.active) return market;
 
-        // Если текущий не активен, пробуем следующий
         const nextSlug = MarketCalculator.formatSlug(asset, next);
-        market = await this.getMarketBySlug(nextSlug);
-        
-        return market;
+        return await this.getMarketBySlug(nextSlug);
     }
 }
 
@@ -258,6 +273,7 @@ interface MarketPrices {
     upTokenId: string;
     downTokenId: string;
     slug: string;
+    marketBias: "UP" | "DOWN" | "NEUTRAL";
 }
 
 class PolymarketService {
@@ -267,168 +283,190 @@ class PolymarketService {
 
     constructor(private config: BotConfig) {
         const signer = new Wallet(config.privateKey);
-        this.clobClient = new ClobClient(
-            config.polymarketHost,
-            config.chainId,
-            signer
-        );
+        this.clobClient = new ClobClient(config. polymarketHost, config.chainId, signer);
         this.gammaClient = new GammaApiClient(config.gammaApiHost);
     }
 
     async initialize(): Promise<void> {
-        console.log("🔑 Инициализация Polymarket.. .");
-
+        console.log("🔑 Инициализация.. .");
         try {
-            this.creds = await this.clobClient.createOrDeriveApiKey();
-        } catch (e) {
-            console.log("⚠️ API ключ недоступен");
-        }
+            this. creds = await this.clobClient.createOrDeriveApiKey();
+        } catch {}
 
         if (this.creds) {
             const signer = new Wallet(this.config.privateKey);
             this.clobClient = new ClobClient(
-                this.config.polymarketHost,
-                this. config.chainId,
+                this.config. polymarketHost,
+                this.config.chainId,
                 signer,
                 this.creds,
                 this.config.signatureType,
                 this.config.funderAddress
             );
         }
-
-        console.log("✅ Polymarket инициализирован");
+        console.log("✅ Готово");
     }
 
     async getMarketPrices(): Promise<MarketPrices> {
-        const market = await this.gammaClient.getCurrentMarket(this.config.asset);
+        const market = await this. gammaClient.getCurrentMarket(this.config.asset);
 
         if (!market) {
             return {
-                upPrice: 0.5,
-                downPrice: 0.5,
-                found: false,
-                question: "Рынок не найден",
-                timeLeft: "",
-                upTokenId: "",
-                downTokenId: "",
-                slug: "",
+                upPrice: 0.5, downPrice: 0.5, found: false,
+                question: "Рынок не найден", timeLeft: "",
+                upTokenId: "", downTokenId: "", slug: "",
+                marketBias: "NEUTRAL",
             };
         }
 
         const timeLeft = MarketCalculator.getTimeLeft(market.endTimestamp);
+        
+        // Определяем bias рынка
+        let marketBias:  "UP" | "DOWN" | "NEUTRAL" = "NEUTRAL";
+        if (market.upPrice > 0.52) marketBias = "UP";
+        else if (market. downPrice > 0.52) marketBias = "DOWN";
 
         return {
-            upPrice: market.upPrice,
-            downPrice: market.downPrice,
-            found:  true,
-            question: market.question,
+            upPrice: market. upPrice,
+            downPrice: market. downPrice,
+            found: true,
+            question: market. question,
             timeLeft,
-            upTokenId: market.upTokenId,
-            downTokenId: market. downTokenId,
-            slug: market. slug,
+            upTokenId: market. upTokenId,
+            downTokenId:  market.downTokenId,
+            slug:  market.slug,
+            marketBias,
         };
     }
 
     async placeBet(tokenId: string, price: number, size: number): Promise<any> {
-        if (!this.creds) {
-            throw new Error("API ключ не доступен");
-        }
+        if (!this.creds) throw new Error("No API key");
 
-        console.log(`\n📝 Ставка:  ${tokenId. substring(0, 20)}... @ ${price} x ${size} USDC`);
+        console.log(`📝 Ставка:  ${tokenId. substring(0, 20)}... @ ${price} x ${size} USDC`);
 
-        const response = await this.clobClient. createAndPostOrder(
-            {
-                tokenID: tokenId,
-                price: price,
-                side: Side.BUY,
-                size: size,
-            },
+        return await this.clobClient.createAndPostOrder(
+            { tokenID: tokenId, price, side: Side.BUY, size },
             { tickSize: "0.01" as any, negRisk: false },
-            OrderType.GTC,
-            false,
-            false
+            OrderType.GTC, false, false
         );
-
-        console.log(`✅ Ордер размещён! `);
-        return response;
     }
 }
 
-// ============== АРБИТРАЖН��Я СТРАТЕГИЯ ==============
+// ============== УЛУЧШЕННАЯ СТРАТЕГИЯ ==============
 
 interface AnalysisResult {
     price: number | null;
     momentum: number | null;
+    volatility: number | null;
+    trend:  { short: number | null; medium: number | null; direction: string };
     direction: "UP" | "DOWN" | "NEUTRAL";
+    confidence: number;
     realProbability: number;
     marketPrices: MarketPrices;
     edge: number;
     shouldTrade: boolean;
+    reason: string;
 }
 
-class ArbitrageStrategy {
+class ImprovedStrategy {
     constructor(
         private priceFeed: BinancePriceFeed,
         private polymarket: PolymarketService,
         private config: BotConfig
     ) {}
 
-    private calculateRealProbability(momentum: number): {
-        prob: number;
-        direction: "UP" | "DOWN" | "NEUTRAL";
-    } {
-        const threshold = this.config.momentumThresholdPercent;
-
-        if (momentum > threshold) {
-            const prob = Math.min(0.85, 0.55 + (momentum / threshold) * 0.15);
-            return { prob, direction: "UP" };
-        } else if (momentum < -threshold) {
-            const prob = Math.min(0.85, 0.55 + (Math.abs(momentum) / threshold) * 0.15);
-            return { prob, direction: "DOWN" };
-        } else {
-            return { prob: 0.5, direction: "NEUTRAL" };
-        }
-    }
-
     async analyze(): Promise<AnalysisResult> {
         const price = this.priceFeed.getCurrentPrice();
         const momentum = this.priceFeed.calculateMomentum(this.config.momentumWindowSeconds);
+        const volatility = this. priceFeed. calculateVolatility(60);
+        const trend = this.priceFeed.calculateTrend();
         const marketPrices = await this.polymarket. getMarketPrices();
 
+        // Базовый результат
+        const result: AnalysisResult = {
+            price, momentum, volatility, trend,
+            direction:  "NEUTRAL",
+            confidence: 0,
+            realProbability: 0. 5,
+            marketPrices,
+            edge: 0,
+            shouldTrade: false,
+            reason: "",
+        };
+
         if (momentum === null) {
-            return {
-                price,
-                momentum: null,
-                direction:  "NEUTRAL",
-                realProbability: 0.5,
-                marketPrices,
-                edge: 0,
-                shouldTrade: false,
-            };
+            result.reason = "Недостаточно данных";
+            return result;
         }
 
-        const { prob:  realProb, direction } = this.calculateRealProbability(momentum);
+        // ========== УЛУЧШЕННЫЙ РАСЧЁТ ВЕРОЯТНОСТИ ==========
+        
+        const threshold = this.config.momentumThresholdPercent;
+        let confidence = 0;
+        let direction:  "UP" | "DOWN" | "NEUTRAL" = "NEUTRAL";
 
+        // 1. Базовый сигнал от моментума
+        if (Math.abs(momentum) > threshold) {
+            direction = momentum > 0 ? "UP" : "DOWN";
+            confidence += 0.3;
+        }
+
+        // 2. Усиление от тренда
+        if (trend.direction === "STRONG_UP" && direction === "UP") {
+            confidence += 0.2;
+        } else if (trend.direction === "STRONG_DOWN" && direction === "DOWN") {
+            confidence += 0.2;
+        }
+
+        // 3. Согласие с рынком (contrarian или confirmation)
+        if (marketPrices. marketBias === direction && direction !== "NEUTRAL") {
+            // Рынок согласен — небольшое подтверждение
+            confidence += 0.1;
+        } else if (marketPrices.marketBias !== "NEUTRAL" && marketPrices.marketBias !== direction) {
+            // Рынок не согласен — либо мы умнее, либо ошибаемся
+            // Не добавляем и не убавляем
+        }
+
+        // 4. Волатильность (высокая = больше возможностей)
+        if (volatility !== null && volatility > 0.05) {
+            confidence += 0.1;
+        }
+
+        // Финальная вероятность
+        let realProbability = 0.5;
+        if (direction !== "NEUTRAL") {
+            realProbability = 0.5 + confidence * 0.35; // Max ~0.67
+            realProbability = Math.min(0.75, Math.max(0.5, realProbability));
+        }
+
+        // Edge расчёт
         let marketProb = 0.5;
-        if (direction === "UP") {
-            marketProb = marketPrices.upPrice;
-        } else if (direction === "DOWN") {
-            marketProb = marketPrices.downPrice;
-        }
+        if (direction === "UP") marketProb = marketPrices.upPrice;
+        else if (direction === "DOWN") marketProb = marketPrices.downPrice;
 
-        const edge = (realProb - marketProb) * 100;
-        const shouldTrade = edge >= this.config.minEdgePercent &&
-            direction !== "NEUTRAL" &&
-            marketPrices.found;
+        const edge = (realProbability - marketProb) * 100;
+
+        // Решение о торговле
+        const shouldTrade = edge >= this.config.minEdgePercent && 
+                           direction !== "NEUTRAL" && 
+                           marketPrices.found &&
+                           confidence >= 0.3;
+
+        let reason = "";
+        if (!marketPrices.found) reason = "Рынок не найден";
+        else if (direction === "NEUTRAL") reason = `Моментум ${momentum. toFixed(4)}% < порог ${threshold}%`;
+        else if (confidence < 0.3) reason = `Низкая уверенность ${(confidence * 100).toFixed(0)}%`;
+        else if (edge < this.config.minEdgePercent) reason = `Edge ${edge.toFixed(2)}% < мин ${this.config.minEdgePercent}%`;
+        else reason = "✅ Сигнал! ";
 
         return {
-            price,
-            momentum,
+            ... result,
             direction,
-            realProbability: realProb,
-            marketPrices,
+            confidence,
+            realProbability,
             edge,
             shouldTrade,
+            reason,
         };
     }
 }
@@ -438,43 +476,33 @@ class ArbitrageStrategy {
 class ArbitrageBot {
     private priceFeed: BinancePriceFeed;
     private polymarket: PolymarketService;
-    private strategy: ArbitrageStrategy;
+    private strategy:  ImprovedStrategy;
     private running = false;
     private lastTradeTime = 0;
-    private lastDetailedLog = 0;
-    private stats = {
-        trades: 0,
-        opportunities: 0,
-        startTime: Date.now(),
-    };
+    private lastLog = 0;
+    private stats = { trades: 0, opportunities: 0, wins: 0, losses: 0 };
 
     constructor(private config: BotConfig) {
         this.priceFeed = new BinancePriceFeed(config.asset);
         this.polymarket = new PolymarketService(config);
-        this.strategy = new ArbitrageStrategy(
-            this.priceFeed,
-            this.polymarket,
-            config
-        );
+        this.strategy = new ImprovedStrategy(this.priceFeed, this.polymarket, config);
     }
 
     async start(): Promise<void> {
-        console.log(`
-╔══════════════════════════════════════════════════════════════╗
-║     🤖 POLYMARKET ${this.config.asset. toUpperCase()} 15-MIN ARBITRAGE BOT              ║
-╠══════════════════════════════════════════════════════════════╣
-║  Актив:  ${this.config. asset.toUpperCase()}  |  Edge: ${this.config.minEdgePercent}%  |  Ставка: $${this.config.betSizeUsdc}            ║
-╚══════════════════════════════════════════════════════════════╝
-        `);
+        console. log(`
+╔═══════���═══════════════════════════════════════════════════════╗
+║  🤖 POLYMARKET ${this.config.asset. toUpperCase()} 15-MIN ARBITRAGE BOT v2          ║
+╠═══════════════════════════════════════════════════════════════╣
+║  Edge: ${this.config.minEdgePercent}% | Порог: ${this. config.momentumThresholdPercent}% | Окно: ${this. config.momentumWindowSeconds}s | Ставка: $${this.config. betSizeUsdc}  ║
+╚═══════════════════════════════════════════════════════════════╝`);
 
         await this.priceFeed.connect();
         await this.polymarket.initialize();
 
-        console.log("⏳ Накапливаем данные (35 сек)...");
-        await this.sleep(35000);
+        console.log("⏳ Накапливаем данные (60 сек)...");
+        await this.sleep(60000);
 
         console.log("🚀 Бот запущен!\n");
-
         this.running = true;
         await this.mainLoop();
     }
@@ -482,35 +510,31 @@ class ArbitrageBot {
     private async mainLoop(): Promise<void> {
         while (this.running) {
             try {
-                const analysis = await this.strategy. analyze();
+                const a = await this.strategy.analyze();
                 const now = Date.now();
 
-                if (now - this.lastDetailedLog >= 5000) {
-                    this.printStatus(analysis);
-                    this.lastDetailedLog = now;
+                if (now - this. lastLog >= 3000) {
+                    this.printStatus(a);
+                    this.lastLog = now;
                 }
 
-                const timeSinceLastTrade = (now - this.lastTradeTime) / 1000;
-                if (timeSinceLastTrade < this.config.cooldownSeconds && this.lastTradeTime > 0) {
-                    await this. sleep(1000);
+                if ((now - this.lastTradeTime) / 1000 < this.config.cooldownSeconds && this.lastTradeTime > 0) {
+                    await this.sleep(1000);
                     continue;
                 }
 
-                if (analysis.shouldTrade) {
+                if (a.shouldTrade) {
                     this.stats.opportunities++;
+                    const tokenId = a.direction === "UP" ?  a.marketPrices.upTokenId : a.marketPrices.downTokenId;
 
-                    const tokenId = analysis.direction === "UP"
-                        ? analysis.marketPrices.upTokenId
-                        : analysis. marketPrices. downTokenId;
-
-                    console.log(`\n🎯 СИГНАЛ: ${analysis.direction} | Edge: ${analysis.edge. toFixed(2)}%`);
+                    console.log(`\n🎯 ${a.direction} | Edge: ${a.edge.toFixed(2)}% | Уверенность: ${(a.confidence * 100).toFixed(0)}%`);
 
                     // РАСКОММЕНТИРУЙТЕ ДЛЯ РЕАЛЬНОЙ ТОРГОВЛИ: 
                     /*
                     if (tokenId) {
-                        const price = analysis.direction === "UP"
-                            ? Math.min(analysis.marketPrices.upPrice + 0.01, 0.99)
-                            :  Math.min(analysis.marketPrices.downPrice + 0.01, 0.99);
+                        const price = a.direction === "UP"
+                            ? Math.min(a.marketPrices.upPrice + 0.01, 0.95)
+                            : Math.min(a.marketPrices.downPrice + 0.01, 0.95);
                         await this.polymarket.placeBet(tokenId, price, this.config.betSizeUsdc);
                         this.stats.trades++;
                         this.lastTradeTime = Date.now();
@@ -522,7 +546,7 @@ class ArbitrageBot {
 
                 await this. sleep(1000);
             } catch (error) {
-                console.error("❌ Ошибка:", error);
+                console.error("❌", error);
                 await this.sleep(5000);
             }
         }
@@ -530,19 +554,23 @@ class ArbitrageBot {
 
     private printStatus(a: AnalysisResult): void {
         const arrow = a.momentum !== null
-            ? (a.momentum > 0 ?  "📈" : a. momentum < 0 ? "📉" : "➡️")
-            : "⏳";
+            ? (a.momentum > 0 ? "📈" : a. momentum < 0 ? "📉" : "➡️") :  "⏳";
+        const trendIcon = a.trend. direction. includes("STRONG") ? "💪" : 
+                         a. trend.direction.includes("WEAK") ? "〰️" : "➖";
 
-        console. log(`
-┌──────────────────────────────────────────────────────────────┐
-│ ${arrow} BINANCE ${this.config.asset. toUpperCase()}:   $${a.price?. toFixed(2) || "N/A"}  Моментум: ${a.momentum?.toFixed(4) || "N/A"}%
-├──────────────────────────────────────────────────────────────┤
-│ 🎰 POLYMARKET:  ${a.marketPrices.found ?  "✅" : "❌"} ${a.marketPrices.slug || "N/A"}
-│    UP: ${(a.marketPrices.upPrice * 100).toFixed(1)}%  DOWN: ${(a. marketPrices. downPrice * 100).toFixed(1)}%  ⏱️ ${a.marketPrices.timeLeft || "N/A"}
-├──────────────────────────────────────────────────────────────┤
-│ 🧠 ${a.direction} | Оценка: ${(a.realProbability * 100).toFixed(1)}% | Edge: ${a.edge.toFixed(2)}% ${a.shouldTrade ? "🎯" : ""}
-│ 📊 Возможностей: ${this.stats.opportunities} | Сделок: ${this. stats.trades}
-└──────────────────────────────────────────────────────────────┘`);
+        console.log(`
+┌───────────────────────────────────────────────────────────────┐
+│ ${arrow} ${this.config.asset. toUpperCase()}: $${a.price?. toFixed(2) || "N/A"}  Mom: ${a.momentum?.toFixed(4) || "N/A"}%  Vol: ${a.volatility?.toFixed(3) || "N/A"}%
+│ ${trendIcon} Тренд: ${a.trend.direction}  (30s:  ${a.trend. short?.toFixed(4) || "N/A"}% | 2m: ${a.trend.medium?.toFixed(4) || "N/A"}%)
+├───────────────────────────────────────────────────────────────┤
+│ 🎰 ${a.marketPrices.slug || "N/A"}
+│    UP: ${(a.marketPrices.upPrice * 100).toFixed(1)}%  DOWN: ${(a.marketPrices.downPrice * 100).toFixed(1)}%  ⏱️ ${a. marketPrices.timeLeft}  Bias: ${a.marketPrices.marketBias}
+├───────────────────────────────────────────────────────────────┤
+│ 🧠 ${a.direction} | Оценка: ${(a.realProbability * 100).toFixed(1)}% | Edge: ${a.edge.toFixed(2)}% | Уверенность: ${(a.confidence * 100).toFixed(0)}%
+│ 💬 ${a.reason}
+├───────────────────────────────────────────────────────────────┤
+│ 📊 Возможностей: ${this.stats.opportunities} | Сделок: ${this.stats.trades}
+└───────────────────────────────────────────────────────────────┘`);
     }
 
     stop(): void {
@@ -560,11 +588,7 @@ class ArbitrageBot {
 
 async function main() {
     const bot = new ArbitrageBot(botConfig);
-
-    process.on("SIGINT", () => {
-        bot.stop();
-        process.exit(0);
-    });
+    process.on("SIGINT", () => { bot.stop(); process.exit(0); });
 
     try {
         await bot.start();
