@@ -1,80 +1,45 @@
-cat > src/check-15m. ts << 'EOF'
-async function check15m() {
-    console.log("🔍 Ищем 15-минутные рынки...\n");
+cat > src/check-wallet.ts << 'EOF'
+import { ethers } from "ethers";
+import { config as dotenvConfig } from "dotenv";
+import { resolve } from "path";
 
-    const res = await fetch(
-        "https://gamma-api.polymarket.com/markets? active=true&closed=false&limit=500"
-    );
-    const data = await res. json() as any[];
+dotenvConfig({ path: resolve(__dirname, "../.env") });
 
-    console. log(`Всего активных рынков:  ${data.length}\n`);
-
-    // Ищем все crypto up/down рынки
-    const updown = data.filter((m: any) => {
-        const slug = (m.slug || "").toLowerCase();
-        const question = (m.question || "").toLowerCase();
-        return slug. includes("updown") || question.includes("up or down");
-    });
-
-    console.log(`Up/Down рынков: ${updown. length}\n`);
-
-    // Группируем по типу (5m, 15m, 1h и т.д.)
-    const by5m = updown.filter((m: any) => m.slug?.includes("-5m-"));
-    const by15m = updown.filter((m: any) => m.slug?.includes("-15m-"));
-    const by1h = updown.filter((m: any) => m.slug?.includes("-1h-"));
-
-    console.log(`5-минутных:  ${by5m. length}`);
-    console.log(`15-минутных: ${by15m.length}`);
-    console.log(`1-часовых: ${by1h.length}\n`);
-
-    // Показываем 15-минутные
-    console.log("=== 15-МИНУТНЫЕ РЫНКИ ===\n");
+async function checkWallet() {
+    const provider = new ethers.providers.JsonRpcProvider("https://polygon-rpc.com");
+    const address = process.env.FUNDER_ADDRESS || "";
     
-    const now = Date.now();
-    const active15m = by15m
-        .filter((m: any) => new Date(m.endDate).getTime() > now)
-        .sort((a:  any, b: any) => 
-            new Date(a.endDate).getTime() - new Date(b.endDate).getTime()
-        );
+    console.log(`\n🔍 Проверяем кошелёк:  ${address}\n`);
 
-    active15m.slice(0, 20).forEach((m: any, i: number) => {
-        const timeLeft = Math.round((new Date(m.endDate).getTime() - now) / 1000 / 60);
-        
-        let prices = [0. 5, 0.5];
-        try {
-            prices = JSON.parse(m. outcomePrices || "[]").map((p: string) => parseFloat(p));
-        } catch {}
+    // MATIC баланс
+    const maticBalance = await provider.getBalance(address);
+    console.log(`MATIC:  ${ethers.utils.formatEther(maticBalance)}`);
 
-        console.log(`${i+1}. ${m.question}`);
-        console.log(`   slug: ${m.slug}`);
-        console.log(`   До истечения: ${timeLeft} мин`);
-        console.log(`   UP:  ${(prices[0] * 100).toFixed(1)}% | DOWN: ${(prices[1] * 100).toFixed(1)}%`);
-        console.log(`   volume24hr: ${m.volume24hr || 0}`);
-        console.log();
-    });
-
-    // Группируем по активу
-    console.log("\n=== ПО АКТИВАМ ===\n");
+    // USDC баланс (Polygon USDC)
+    const usdcAddress = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
+    const usdcAbi = ["function balanceOf(address) view returns (uint256)"];
+    const usdc = new ethers. Contract(usdcAddress, usdcAbi, provider);
     
-    const assets = ["btc", "eth", "sol", "xrp"];
-    for (const asset of assets) {
-        const assetMarkets = active15m.filter((m: any) => 
-            m.slug?.toLowerCase().includes(`${asset}-updown-15m`)
-        );
-        console.log(`${asset. toUpperCase()}: ${assetMarkets.length} активных 15m рынков`);
-        
-        if (assetMarkets.length > 0) {
-            const next = assetMarkets[0];
-            const timeLeft = Math.round((new Date(next.endDate).getTime() - now) / 1000 / 60);
-            console.log(`   Ближайший:  ${next.question}`);
-            console. log(`   До истечения: ${timeLeft} мин`);
-        }
-        console. log();
-    }
+    const usdcBalance = await usdc.balanceOf(address);
+    console.log(`USDC: ${ethers.utils.formatUnits(usdcBalance, 6)}`);
+
+    // USDC. e (bridged USDC)
+    const usdceAddress = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359";
+    const usdce = new ethers. Contract(usdceAddress, usdcAbi, provider);
+    
+    try {
+        const usdceBalance = await usdce.balanceOf(address);
+        console.log(`USDC.e: ${ethers.utils.formatUnits(usdceBalance, 6)}`);
+    } catch {}
+
+    console.log(`\n📋 Что нужно для торговли:`);
+    console.log(`   - USDC на Polygon (минимум $5-10 для тестов)`);
+    console.log(`   - MATIC для газа (минимум 0.1 MATIC)`);
+    console.log(`   - Активированный аккаунт на polymarket.com`);
 }
 
-check15m();
+checkWallet();
 EOF
 
-npx tsc src/check-15m.ts --outDir dist --esModuleInterop --skipLibCheck --module CommonJS --target ES2020
-node dist/check-15m.js
+npx tsc src/check-wallet.ts --outDir dist --esModuleInterop --skipLibCheck --module CommonJS --target ES2020
+node dist/check-wallet.js
