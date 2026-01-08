@@ -1,6 +1,6 @@
 /**
  * Polymarket BTC 15-minute Arbitrage Bot
- * С отображением сравнения цен Binance vs Polymarket
+ * Использует Gamma API для поиска 15-min рынков
  */
 
 import { ClobClient, Side, OrderType, Chain } from "@polymarket/clob-client";
@@ -16,6 +16,7 @@ dotenvConfig({ path: resolve(__dirname, "../.env") });
 
 interface BotConfig {
     polymarketHost: string;
+    gammaApiHost: string;
     chainId: Chain;
     privateKey: string;
     funderAddress: string;
@@ -24,21 +25,20 @@ interface BotConfig {
     betSizeUsdc: number;
     momentumWindowSeconds: number;
     momentumThresholdPercent: number;
-    maxOpenPositions: number;
     cooldownSeconds: number;
 }
 
 const botConfig: BotConfig = {
-    polymarketHost: "https://clob.polymarket.com",
-    chainId:  137 as Chain,
+    polymarketHost: "https://clob.polymarket. com",
+    gammaApiHost: "https://gamma-api.polymarket.com",
+    chainId: 137 as Chain,
     privateKey: process. env.PRIVATE_KEY || "",
-    funderAddress: process.env.FUNDER_ADDRESS || "",
+    funderAddress: process.env. FUNDER_ADDRESS || "",
     signatureType: 1,
-    minEdgePercent:  5. 0,
+    minEdgePercent: 5. 0,
     betSizeUsdc:  50,
     momentumWindowSeconds: 30,
     momentumThresholdPercent: 0.15,
-    maxOpenPositions: 3,
     cooldownSeconds: 60,
 };
 
@@ -57,28 +57,26 @@ class BinancePriceFeed {
     private maxReconnectAttempts = 10;
 
     async connect(): Promise<void> {
-        return new Promise((resolve, reject) => {
-            this.ws = new WebSocket(this.wsUrl);
+        return new Promise((resolvePromise, reject) => {
+            this.ws = new WebSocket(this. wsUrl);
 
             this.ws. on("open", () => {
                 console.log("✅ Подключено к Binance WebSocket");
                 this.reconnectAttempts = 0;
-                resolve();
+                resolvePromise();
             });
 
-            this.ws. on("message", (data:  WebSocket.Data) => {
+            this.ws.on("message", (data:  WebSocket.Data) => {
                 try {
-                    const trade = JSON.parse(data. toString());
+                    const trade = JSON.parse(data.toString());
                     const price = parseFloat(trade.p);
                     const timestamp = Date.now();
-
                     this.prices.push({ timestamp, price });
-
+                    
+                    // Храним только последние 5 минут
                     const cutoff = timestamp - 300000;
-                    this. prices = this.prices.filter(p => p.timestamp > cutoff);
-                } catch (e) {
-                    // Ignore parse errors
-                }
+                    this.prices = this. prices.filter(p => p.timestamp > cutoff);
+                } catch (e) {}
             });
 
             this.ws.on("error", (error) => {
@@ -101,12 +99,12 @@ class BinancePriceFeed {
     }
 
     getCurrentPrice(): number | null {
-        if (this.prices.length === 0) return null;
+        if (this.prices. length === 0) return null;
         return this.prices[this.prices.length - 1].price;
     }
 
     calculateMomentum(windowSeconds: number): number | null {
-        if (this.prices. length < 2) return null;
+        if (this.prices.length < 2) return null;
 
         const currentTime = Date.now();
         const cutoff = currentTime - windowSeconds * 1000;
@@ -115,7 +113,7 @@ class BinancePriceFeed {
         if (pastPrices.length === 0) return null;
 
         const pastPrice = pastPrices[pastPrices.length - 1].price;
-        const currentPrice = this.prices[this.prices.length - 1].price;
+        const currentPrice = this.prices[this.prices. length - 1]. price;
 
         return ((currentPrice - pastPrice) / pastPrice) * 100;
     }
@@ -128,54 +126,149 @@ class BinancePriceFeed {
     }
 }
 
-// ============== POLYMARKET CLIENT ==============
+// ============== GAMMA API CLIENT ==============
 
-interface BtcMarket {
-    conditionId: string;
+interface GammaMarket {
+    id:  string;
     question: string;
-    tokens: Array<{
-        token_id: string;
-        outcome:  string;
-    }>;
-    tickSize: string;
-    negRisk: boolean;
+    conditionId: string;
+    slug: string;
+    outcomes: string[];
+    outcomePrices: string[];
+    clobTokenIds: string[];
+    active: boolean;
+    closed: boolean;
+    endDate: string;
 }
+
+class GammaApiClient {
+    constructor(private host: string) {}
+
+    async findBtc15MinMarkets(): Promise<GammaMarket[]> {
+        try {
+            // Ищем активные 15-минутные BTC рынки
+            const response = await fetch(
+                `${this.host}/markets? closed=false&active=true`
+            );
+            const markets:  any[] = await response.json();
+
+            // Фильтруем 15-минутные BTC рынки
+            const btcMarkets = markets.filter((m: any) => {
+                const question = (m.question || "").toLowerCase();
+                const slug = (m. slug || "").toLowerCase();
+                
+                return (
+                    (question.includes("btc") || question.includes("bitcoin")) &&
+                    (question.includes("15") || slug.includes("15m")) &&
+                    m.active === true &&
+                    m. closed === false
+                );
+            });
+
+            return btcMarkets.map((m: any) => ({
+                id: m.id,
+                question: m.question,
+                conditionId: m.conditionId,
+                slug: m.slug,
+                outcomes:  m.outcomes || [],
+                outcomePrices: m.outcomePrices || [],
+                clobTokenIds:  m.clobTokenIds || [],
+                active: m.active,
+                closed:  m.closed,
+                endDate: m.endDate,
+            }));
+        } catch (error) {
+            console.error("Ошибка Gamma API:", error);
+            return [];
+        }
+    }
+
+    async getCurrentBtc15MinMarket(): Promise<GammaMarket | null> {
+        const markets = await this.findBtc15MinMarkets();
+        
+        if (markets. length === 0) {
+            // Попробуем другой поиск
+            try {
+                const response = await fetch(`${this.host}/markets?tag=crypto&closed=false`);
+                const allMarkets:  any[] = await response.json();
+                
+                const btc15m = allMarkets. find((m: any) => {
+                    const q = (m.question || "").toLowerCase();
+                    const s = (m.slug || "").toLowerCase();
+                    return s.includes("btc") && s.includes("15m") && ! m.closed;
+                });
+                
+                if (btc15m) {
+                    return {
+                        id:  btc15m. id,
+                        question: btc15m.question,
+                        conditionId: btc15m.conditionId,
+                        slug:  btc15m. slug,
+                        outcomes: btc15m.outcomes || [],
+                        outcomePrices:  btc15m. outcomePrices || [],
+                        clobTokenIds:  btc15m. clobTokenIds || [],
+                        active: btc15m.active,
+                        closed: btc15m.closed,
+                        endDate: btc15m.endDate,
+                    };
+                }
+            } catch (e) {}
+            
+            return null;
+        }
+
+        // Возвращаем ближайший к истечению активный рынок
+        const now = Date.now();
+        const sorted = markets
+            .filter(m => new Date(m.endDate).getTime() > now)
+            .sort((a, b) => 
+                new Date(a.endDate).getTime() - new Date(b.endDate).getTime()
+            );
+
+        return sorted[0] || null;
+    }
+}
+
+// ============== POLYMARKET SERVICE ==============
 
 interface MarketPrices {
     upPrice: number;
     downPrice: number;
     found: boolean;
     question: string;
+    endDate: string;
+    timeLeft: string;
+    upTokenId: string;
+    downTokenId: string;
 }
 
 class PolymarketService {
-    private client: ClobClient;
+    private clobClient: ClobClient;
+    private gammaClient: GammaApiClient;
     private creds: ApiKeyCreds | null = null;
-    private cachedMarket: BtcMarket | null = null;
-    private lastMarketFetch:  number = 0;
-    private marketCacheDuration:  number = 60000; // 1 минута
 
     constructor(private config: BotConfig) {
         const signer = new Wallet(config.privateKey);
-        this.client = new ClobClient(
+        this.clobClient = new ClobClient(
             config.polymarketHost,
             config.chainId,
             signer
         );
+        this.gammaClient = new GammaApiClient(config.gammaApiHost);
     }
 
     async initialize(): Promise<void> {
         console.log("🔑 Инициализация Polymarket клиента...");
-        
+
         try {
-            this.creds = await this.client.createOrDeriveApiKey();
+            this.creds = await this.clobClient.createOrDeriveApiKey();
         } catch (e) {
-            console.log("⚠️ Не удалось получить API ключ, продолжаем с публичным доступом");
+            console. log("⚠️ API ключ недоступен, используем публичный доступ");
         }
-        
+
         if (this.creds) {
             const signer = new Wallet(this.config.privateKey);
-            this.client = new ClobClient(
+            this.clobClient = new ClobClient(
                 this.config.polymarketHost,
                 this. config.chainId,
                 signer,
@@ -185,143 +278,107 @@ class PolymarketService {
             );
         }
 
-        console.log("✅ Polymarket клиент инициализирован");
-    }
-
-    async findBtc15MinMarket(): Promise<BtcMarket | null> {
-        // Используем кэш чтобы не делать много запросов
-        const now = Date.now();
-        if (this.cachedMarket && (now - this.lastMarketFetch) < this.marketCacheDuration) {
-            return this. cachedMarket;
-        }
-
-        try {
-            const response = await this.client.getMarkets();
-            const markets:  any[] = (response as any).data || [];
-
-            for (const market of markets) {
-                const question = (market.question || "").toLowerCase();
-                if (
-                    question.includes("bitcoin") &&
-                    question. includes("15") &&
-                    (question.includes("up") || question.includes("down"))
-                ) {
-                    this.cachedMarket = {
-                        conditionId: market.condition_id,
-                        question: market.question,
-                        tokens: market. tokens || [],
-                        tickSize: market.minimum_tick_size || "0.01",
-                        negRisk: market. neg_risk || false,
-                    };
-                    this.lastMarketFetch = now;
-                    return this.cachedMarket;
-                }
-            }
-            return null;
-        } catch (error) {
-            console.error("Ошибка поиска рынка:", error);
-            return null;
-        }
+        console. log("✅ Polymarket клиент инициализирован");
     }
 
     async getMarketPrices(): Promise<MarketPrices> {
-        const market = await this.findBtc15MinMarket();
-        
+        const market = await this.gammaClient.getCurrentBtc15MinMarket();
+
         if (!market) {
-            return { upPrice: 0. 5, downPrice: 0.5, found: false, question:  "Рынок не найден" };
+            return {
+                upPrice: 0.5,
+                downPrice: 0.5,
+                found:  false,
+                question: "Рынок не найден",
+                endDate: "",
+                timeLeft:  "",
+                upTokenId: "",
+                downTokenId: "",
+            };
         }
 
-        let upPrice = 0. 5;
+        // Парсим цены и�� Gamma API
+        let upPrice = 0.5;
         let downPrice = 0.5;
+        let upTokenId = "";
+        let downTokenId = "";
 
-        for (const token of market.tokens) {
-            try {
-                const midpoint = await this.client.getMidpoint(token.token_id);
-                const price = parseFloat((midpoint as any)?.mid || "0.5");
-                
-                if (token.outcome. toLowerCase().includes("up") || token.outcome. toLowerCase().includes("yes")) {
-                    upPrice = price;
-                } else if (token.outcome. toLowerCase().includes("down") || token.outcome.toLowerCase().includes("no")) {
-                    downPrice = price;
-                }
-            } catch (e) {
-                // Используем дефолтные значения
+        for (let i = 0; i < market.outcomes.length; i++) {
+            const outcome = market.outcomes[i]. toLowerCase();
+            const price = parseFloat(market.outcomePrices[i] || "0.5");
+            const tokenId = market.clobTokenIds[i] || "";
+
+            if (outcome. includes("up") || outcome.includes("yes")) {
+                upPrice = price;
+                upTokenId = tokenId;
+            } else if (outcome.includes("down") || outcome.includes("no")) {
+                downPrice = price;
+                downTokenId = tokenId;
             }
         }
 
-        return { upPrice, downPrice, found: true, question: market.question };
-    }
+        // Вычисляем оставшееся время
+        const endTime = new Date(market.endDate).getTime();
+        const now = Date.now();
+        const timeLeftMs = endTime - now;
+        const timeLeftMin = Math.floor(timeLeftMs / 60000);
+        const timeLeftSec = Math.floor((timeLeftMs % 60000) / 1000);
+        const timeLeft = `${timeLeftMin}м ${timeLeftSec}с`;
 
-    async getMarketPrice(tokenId: string): Promise<number> {
-        try {
-            const midpoint = await this. client.getMidpoint(tokenId);
-            return parseFloat((midpoint as any)?.mid || "0.5");
-        } catch {
-            return 0.5;
-        }
+        return {
+            upPrice,
+            downPrice,
+            found: true,
+            question:  market.question,
+            endDate: market.endDate,
+            timeLeft,
+            upTokenId,
+            downTokenId,
+        };
     }
 
     async placeBet(
         tokenId: string,
-        side: "UP" | "DOWN",
         price: number,
-        size: number,
-        tickSize: string,
-        negRisk: boolean
+        size: number
     ): Promise<any> {
+        if (!this.creds) {
+            throw new Error("API ключ не доступен для торговли");
+        }
+
         console.log(`\n📝 Размещаем ставку:`);
-        console.log(`   Token ID: ${tokenId. substring(0, 20)}...`);
-        console.log(`   Направление: ${side}`);
+        console.log(`   Token ID: ${tokenId. substring(0, 30)}...`);
         console.log(`   Цена: ${price}`);
         console.log(`   Размер: ${size} USDC`);
 
-        try {
-            const response = await this.client.createAndPostOrder(
-                {
-                    tokenID: tokenId,
-                    price: price,
-                    side: Side. BUY,
-                    size: size,
-                },
-                { 
-                    tickSize: tickSize as any,
-                    negRisk: negRisk 
-                },
-                OrderType.GTC,
-                false,
-                false
-            );
+        const response = await this.clobClient.createAndPostOrder(
+            {
+                tokenID: tokenId,
+                price: price,
+                side: Side.BUY,
+                size: size,
+            },
+            { tickSize: "0.01" as any, negRisk: false },
+            OrderType.GTC,
+            false,
+            false
+        );
 
-            console.log(`✅ Ордер размещён: `, response);
-            return response;
-        } catch (error) {
-            console.error(`❌ Ошибка размещения ордера:`, error);
-            throw error;
-        }
+        console.log(`✅ Ордер размещён! `);
+        return response;
     }
 }
 
 // ============== АРБИТРАЖНАЯ СТРАТЕГИЯ ==============
 
-interface ArbitrageOpportunity {
-    direction: "UP" | "DOWN";
-    tokenId: string;
-    realProbability: number;
-    marketProbability: number;
-    edge: number;
-    recommendedPrice: number;
-    size: number;
-    tickSize: string;
-    negRisk:  boolean;
-}
-
 interface AnalysisResult {
+    btcPrice: number | null;
     momentum: number | null;
     direction: "UP" | "DOWN" | "NEUTRAL";
     realProbability: number;
     marketPrices: MarketPrices;
     edge: number;
-    opportunity: ArbitrageOpportunity | null;
+    shouldTrade: boolean;
 }
 
 class ArbitrageStrategy {
@@ -331,7 +388,10 @@ class ArbitrageStrategy {
         private config: BotConfig
     ) {}
 
-    private calculateRealProbability(momentum: number): { prob: number; direction: "UP" | "DOWN" | "NEUTRAL" } {
+    private calculateRealProbability(momentum: number): {
+        prob: number;
+        direction: "UP" | "DOWN" | "NEUTRAL";
+    } {
         const threshold = this.config.momentumThresholdPercent;
 
         if (momentum > threshold) {
@@ -346,63 +406,44 @@ class ArbitrageStrategy {
     }
 
     async analyze(): Promise<AnalysisResult> {
+        const btcPrice = this.priceFeed.getCurrentPrice();
         const momentum = this.priceFeed.calculateMomentum(this.config.momentumWindowSeconds);
-        const marketPrices = await this. polymarket.getMarketPrices();
-        
+        const marketPrices = await this.polymarket. getMarketPrices();
+
         if (momentum === null) {
             return {
-                momentum: null,
+                btcPrice,
+                momentum:  null,
                 direction: "NEUTRAL",
-                realProbability:  0.5,
+                realProbability: 0.5,
                 marketPrices,
                 edge: 0,
-                opportunity:  null
+                shouldTrade: false,
             };
         }
 
         const { prob:  realProb, direction } = this.calculateRealProbability(momentum);
-        
+
         let marketProb = 0.5;
         if (direction === "UP") {
             marketProb = marketPrices.upPrice;
         } else if (direction === "DOWN") {
-            marketProb = marketPrices. downPrice;
+            marketProb = marketPrices.downPrice;
         }
 
         const edge = (realProb - marketProb) * 100;
-
-        let opportunity:  ArbitrageOpportunity | null = null;
-
-        if (edge >= this.config.minEdgePercent && direction !== "NEUTRAL" && marketPrices.found) {
-            const market = await this.polymarket.findBtc15MinMarket();
-            if (market) {
-                const targetToken = market.tokens. find(t => 
-                    t. outcome.toLowerCase().includes(direction.toLowerCase())
-                );
-                
-                if (targetToken) {
-                    opportunity = {
-                        direction,
-                        tokenId: targetToken.token_id,
-                        realProbability: realProb,
-                        marketProbability: marketProb,
-                        edge,
-                        recommendedPrice: Math.min(marketProb + 0.01, 0.99),
-                        size: this.config.betSizeUsdc,
-                        tickSize:  market.tickSize,
-                        negRisk: market.negRisk,
-                    };
-                }
-            }
-        }
+        const shouldTrade = edge >= this.config.minEdgePercent && 
+                           direction !== "NEUTRAL" && 
+                           marketPrices.found;
 
         return {
+            btcPrice,
             momentum,
             direction,
-            realProbability: realProb,
+            realProbability:  realProb,
             marketPrices,
             edge,
-            opportunity
+            shouldTrade,
         };
     }
 }
@@ -412,7 +453,7 @@ class ArbitrageStrategy {
 class ArbitrageBot {
     private priceFeed: BinancePriceFeed;
     private polymarket: PolymarketService;
-    private strategy: ArbitrageStrategy;
+    private strategy:  ArbitrageStrategy;
     private running = false;
     private lastTradeTime = 0;
     private lastDetailedLog = 0;
@@ -433,13 +474,14 @@ class ArbitrageBot {
     }
 
     async start(): Promise<void> {
-        console.log(`
+        console. log(`
 ╔══════════════════════════════════════════════════════════════╗
 ║     🤖 POLYMARKET BTC 15-MIN ARBITRAGE BOT                   ║
 ╠══════════════════════════════════════════════════════════════╣
 ║  Минимальный edge: ${this.config.minEdgePercent}%                                   ║
-║  Размер ставки:  $${this.config. betSizeUsdc}                                       ║
-║  Окно моментума: ${this.config.momentumWindowSeconds}s                                    ║
+║  Размер ставки:  $${this.config. betSizeUsdc}                                        ║
+║  Окно моментума: ${this.config.momentumWindowSeconds}s                                     ║
+║  Используем Gamma API для 15-min рынков                      ║
 ╚══════════════════════════════════════════════════════════════╝
         `);
 
@@ -449,7 +491,7 @@ class ArbitrageBot {
         console.log("⏳ Накапливаем данные о ценах (35 секунд)...");
         await this.sleep(35000);
 
-        console.log("🚀 Бот запущен!  Ищем арбитражные возможности.. .\n");
+        console.log("🚀 Бот запущен!\n");
 
         this.running = true;
         await this.mainLoop();
@@ -458,27 +500,13 @@ class ArbitrageBot {
     private async mainLoop(): Promise<void> {
         while (this.running) {
             try {
-                const btcPrice = this.priceFeed.getCurrentPrice();
-                const analysis = await this.strategy.analyze();
-                
-                // Выводим подробную информацию каждые 10 секунд
+                const analysis = await this.strategy. analyze();
                 const now = Date.now();
-                if (now - this.lastDetailedLog >= 10000) {
-                    this. printDetailedStatus(btcPrice, analysis);
-                    this. lastDetailedLog = now;
-                } else {
-                    // Краткий статус
-                    if (btcPrice) {
-                        const arrow = analysis.momentum !== null 
-                            ? (analysis.momentum > 0 ?  "📈" : analysis.momentum < 0 ? "📉" : "➡️")
-                            : "⏳";
-                        process.stdout.write(
-                            `\r${arrow} BTC: $${btcPrice. toFixed(2)} | ` +
-                            `PM UP: ${(analysis.marketPrices.upPrice * 100).toFixed(1)}% | ` +
-                            `Edge: ${analysis.edge.toFixed(1)}% | ` +
-                            `Сделок: ${this.stats.trades}   `
-                        );
-                    }
+
+                // Подробный статус каждые 5 секунд
+                if (now - this. lastDetailedLog >= 5000) {
+                    this. printDetailedStatus(analysis);
+                    this.lastDetailedLog = now;
                 }
 
                 // Проверяем cooldown
@@ -489,34 +517,36 @@ class ArbitrageBot {
                 }
 
                 // Если есть возможность
-                if (analysis. opportunity) {
+                if (analysis. shouldTrade) {
                     this.stats.opportunities++;
-                    console.log(`\n\n🎯 НАЙДЕНА АРБИТРАЖНАЯ ВОЗМОЖНОСТЬ! `);
-                    console.log(`   Направление: ${analysis.opportunity.direction}`);
-                    console.log(`   Edge: ${analysis.opportunity.edge.toFixed(2)}%`);
-                    console.log(`   Наша оценка: ${(analysis.opportunity.realProbability * 100).toFixed(1)}%`);
-                    console. log(`   Цена рынка:  ${(analysis.opportunity.marketProbability * 100).toFixed(1)}%`);
-                    console. log(`   Размер ставки:  $${analysis.opportunity. size}`);
+                    
+                    const tokenId = analysis.direction === "UP" 
+                        ? analysis.marketPrices.upTokenId 
+                        : analysis.marketPrices.downTokenId;
+
+                    console.log(`\n🎯 АРБИТРАЖНАЯ ВОЗМОЖНОСТЬ! `);
+                    console.log(`   Направление: ${analysis. direction}`);
+                    console.log(`   Edge: ${analysis.edge. toFixed(2)}%`);
+                    console.log(`   Наша оценка: ${(analysis.realProbability * 100).toFixed(1)}%`);
+                    console.log(`   Цена рынка:  ${(analysis.direction === "UP" ?  analysis.marketPrices.upPrice :  analysis.marketPrices.downPrice) * 100}%`);
 
                     // РАСКОММЕНТИРУЙТЕ ДЛЯ РЕАЛЬНОЙ ТОРГОВЛИ: 
                     /*
-                    await this.polymarket.placeBet(
-                        analysis.opportunity. tokenId,
-                        analysis.opportunity. direction,
-                        analysis. opportunity.recommendedPrice,
-                        analysis.opportunity. size,
-                        analysis.opportunity.tickSize,
-                        analysis.opportunity.negRisk
-                    );
-                    
-                    this.stats.trades++;
-                    this.lastTradeTime = Date.now();
+                    if (tokenId) {
+                        await this.polymarket. placeBet(
+                            tokenId,
+                            analysis. direction === "UP" ?  analysis.marketPrices.upPrice + 0.01 : analysis.marketPrices.downPrice + 0.01,
+                            this.config.betSizeUsdc
+                        );
+                        this.stats.trades++;
+                        this.lastTradeTime = Date.now();
+                    }
                     */
 
-                    console.log("   ⚠️ СИМУЛЯЦИЯ - ордер НЕ размещён\n");
+                    console.log(`   ⚠️ СИМУЛЯЦИЯ - ордер НЕ размещён\n`);
                 }
 
-                await this.sleep(1000);
+                await this. sleep(1000);
             } catch (error) {
                 console.error("\n❌ Ошибка:", error);
                 await this.sleep(5000);
@@ -524,53 +554,37 @@ class ArbitrageBot {
         }
     }
 
-    private printDetailedStatus(btcPrice: number | null, analysis: AnalysisResult): void {
-        console.log(`\n
+    private printDetailedStatus(analysis: AnalysisResult): void {
+        const arrow = analysis.momentum !== null
+            ? (analysis.momentum > 0 ? "📈" : analysis.momentum < 0 ? "📉" : "➡️")
+            : "⏳";
+
+        console. log(`
 ┌─────────────────────────────────────────────────────────────┐
-│                    📊 СРАВНЕНИЕ ЦЕН                         │
+│ ${arrow} BINANCE BTC:   $${analysis.btcPrice?.toFixed(2) || "N/A"}                              
+│    Моментум (${this.config.momentumWindowSeconds}s): ${analysis.momentum?. toFixed(4) || "N/A"}%                          
+├───────���─────────────────────────────────────────────────────┤
+│ 🎰 POLYMARKET:  ${analysis.marketPrices.found ? "✅" : "❌"} ${analysis.marketPrices.question. substring(0, 35)}
+│    ⬆️  UP:    ${(analysis.marketPrices.upPrice * 100).toFixed(1)}%                                    
+│    ⬇️  DOWN: ${(analysis. marketPrices. downPrice * 100).toFixed(1)}%                                  
+│    ⏱️  Осталось: ${analysis.marketPrices.timeLeft || "N/A"}                            
 ├─────────────────────────────────────────────────────────────┤
-│  BINANCE BTC/USDT:      $${btcPrice?. toFixed(2) || "N/A"}                          
-│  Моментум (${this.config.momentumWindowSeconds}s):        ${analysis.momentum?.toFixed(4) || "N/A"}%                         
+│ 🧠 АНАЛИЗ:  ${analysis.direction}                                       
+│    Наша оценка:  ${(analysis.realProbability * 100).toFixed(1)}%                              
+│    Edge:  ${analysis.edge. toFixed(2)}% ${analysis.shouldTrade ? "🎯 СИГНАЛ!" : ""}                                   
 ├─────────────────────────────────────────────────────────────┤
-│  POLYMARKET:            ${analysis.marketPrices.found ? "✅ Найден" : "❌ Не найден"}                      
-│  Рынок:                ${analysis.marketPrices.question. substring(0, 40)}...
-│  Цена UP:              ${(analysis.marketPrices.upPrice * 100).toFixed(1)}%                              
-│  Цена DOWN:            ${(analysis.marketPrices.downPrice * 100).toFixed(1)}%                            
-├─────────────────────────────────────────────────────────────┤
-│  АНАЛИЗ:                                                    │
-│  Направление:          ${analysis.direction}                                 
-│  Наша оценка:           ${(analysis. realProbability * 100).toFixed(1)}%                              
-│  Edge:                 ${analysis.edge.toFixed(2)}% ${analysis.edge >= this.config.minEdgePercent ? "🎯 СИГНАЛ!" : ""}                             
-├─────────────────────────────────────────────────────────────┤
-│  СТАТИСТИКА:                                                │
-│  Возможностей:         ${this.stats.opportunities}                                   
-│  Сделок:               ${this.stats. trades}                                   
-└─────────────────────────────────────────────────────────────┘
-        `);
+│ 📊 Возможностей: ${this.stats.opportunities} | Сделок: ${this.stats.trades}                      
+└─────────────────────────────────────────────────────────────┘`);
     }
 
     stop(): void {
-        console.log("\n\n🛑 Останавливаем бота...");
+        console.log("\n🛑 Останавливаем бота...");
         this.running = false;
         this.priceFeed.disconnect();
-        this.printStats();
-    }
-
-    private printStats(): void {
-        const runtime = (Date.now() - this.stats.startTime) / 1000 / 60;
-        console.log(`
-╔══════════════════════════════════════════════════════════════╗
-║                      📊 ИТОГОВАЯ СТАТИСТИКА                  ║
-╠══════════════════════════════════════════════════════════════╣
-║  Время работы:  ${runtime.toFixed(1)} минут
-║  Всего сделок:  ${this.stats. trades}
-║  Найдено возможностей: ${this.stats.opportunities}
-╚══════════════════════════════════════════════════════════════╝
-        `);
     }
 
     private sleep(ms: number): Promise<void> {
-        return new Promise(resolve => setTimeout(resolve, ms));
+        return new Promise(r => setTimeout(r, ms));
     }
 }
 
@@ -588,7 +602,6 @@ async function main() {
         await bot.start();
     } catch (error) {
         console. error("Критическая ошибка:", error);
-        bot.stop();
         process.exit(1);
     }
 }
