@@ -1,0 +1,14 @@
+# Polymarket Configuration
+# Ваш приватный ключ кошелька (БЕЗ 0x)
+PRIVATE_KEY=your_private_key_here
+
+# Адрес вашего Polymarket профиля (куда отправляете USDC)
+FUNDER_ADDRESS=0xYourPolymarketProfileAddress
+
+# Опционально - если уже есть API ключи
+CLOB_API_KEY=
+CLOB_SECRET=
+CLOB_PASS_PHRASE=
+
+# Chain ID (137 = Polygon Mainnet)
+CHAIN_ID=137
