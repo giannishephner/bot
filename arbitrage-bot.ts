@@ -1,8 +1,5 @@
 /**
  * Polymarket BTC 15-minute Arbitrage Bot
- * 
- * Использует официальный @polymarket/clob-client для взаимодействия с Polymarket
- * и Binance WebSocket для получения цен BTC в реальном времени
  */
 
 import { ClobClient, Side, OrderType, Chain } from "@polymarket/clob-client";
@@ -17,29 +14,25 @@ dotenvConfig({ path: resolve(__dirname, "../.env") });
 // ============== КОНФИГУРАЦИЯ ==============
 
 interface BotConfig {
-    // Polymarket
     polymarketHost: string;
     chainId: Chain;
     privateKey: string;
-    funderAddress:  string;
-    signatureType: 0 | 1; // 0: Browser Wallet, 1: Magic/Email
-
-    // Стратегия
-    minEdgePercent: number;       // Минимальное преимущество для входа (%)
-    betSizeUsdc: number;          // Размер ставки в USDC
-    momentumWindowSeconds: number; // Окно для расчёта моментума
-    momentumThresholdPercent: number; // Порог моментума для сигнала
-    maxOpenPositions: number;     // Максимум открытых позиций
-    cooldownSeconds: number;      // Пауза между сделками
+    funderAddress: string;
+    signatureType: 0 | 1;
+    minEdgePercent: number;
+    betSizeUsdc: number;
+    momentumWindowSeconds: number;
+    momentumThresholdPercent: number;
+    maxOpenPositions: number;
+    cooldownSeconds: number;
 }
 
-const config: BotConfig = {
+const botConfig: BotConfig = {
     polymarketHost: "https://clob.polymarket. com",
-    chainId: Chain. POLYGON, // 137 для mainnet
-    privateKey: process.env. PRIVATE_KEY || "",
+    chainId: 137 as Chain,
+    privateKey: process. env.PRIVATE_KEY || "",
     funderAddress: process.env. FUNDER_ADDRESS || "",
-    signatureType: 1, // Magic/Email login
-
+    signatureType: 1,
     minEdgePercent: 5. 0,
     betSizeUsdc:  50,
     momentumWindowSeconds: 30,
@@ -80,11 +73,10 @@ class BinancePriceFeed {
 
                     this.prices.push({ timestamp, price });
 
-                    // Храним только последние 5 минут
-                    const cutoff = timestamp - 300_000;
-                    this.prices = this. prices.filter(p => p.timestamp > cutoff);
+                    const cutoff = timestamp - 300000;
+                    this. prices = this.prices.filter(p => p.timestamp > cutoff);
                 } catch (e) {
-                    // Игнорируем ошибки парсинга
+                    // Ignore parse errors
                 }
             });
 
@@ -94,8 +86,8 @@ class BinancePriceFeed {
             });
 
             this. ws.on("close", () => {
-                console.log("⚠️ Binance WebSocket закрыт, переподключение...");
-                this.reconnect();
+                console.log("⚠️ Binance WebSocket закрыт, переподключение.. .");
+                this. reconnect();
             });
         });
     }
@@ -108,7 +100,7 @@ class BinancePriceFeed {
     }
 
     getCurrentPrice(): number | null {
-        if (this.prices. length === 0) return null;
+        if (this. prices.length === 0) return null;
         return this.prices[this.prices.length - 1].price;
     }
 
@@ -122,7 +114,7 @@ class BinancePriceFeed {
         if (pastPrices.length === 0) return null;
 
         const pastPrice = pastPrices[pastPrices.length - 1].price;
-        const currentPrice = this.prices[this.prices. length - 1]. price;
+        const currentPrice = this.prices[this.prices.length - 1].price;
 
         return ((currentPrice - pastPrice) / pastPrice) * 100;
     }
@@ -140,10 +132,10 @@ class BinancePriceFeed {
 interface BtcMarket {
     conditionId: string;
     question: string;
-    tokens: {
+    tokens: Array<{
         token_id: string;
         outcome:  string;
-    }[];
+    }>;
     tickSize: string;
     negRisk: boolean;
 }
@@ -155,19 +147,17 @@ class PolymarketService {
     constructor(private config: BotConfig) {
         const signer = new Wallet(config.privateKey);
         this.client = new ClobClient(
-            config. polymarketHost,
+            config.polymarketHost,
             config.chainId,
             signer
         );
     }
 
     async initialize(): Promise<void> {
-        console.log("🔑 Инициализация Polymarket клиента...");
+        console.log("🔑 Инициализация Polymarket клиента.. .");
         
-        // Создаём или получаем API ключи
-        this.creds = await this. client.createOrDeriveApiKey();
+        this.creds = await this.client.createOrDeriveApiKey();
         
-        // Пересоздаём клиент с учётными данными
         const signer = new Wallet(this.config.privateKey);
         this.client = new ClobClient(
             this.config.polymarketHost,
@@ -183,12 +173,12 @@ class PolymarketService {
 
     async findBtc15MinMarket(): Promise<BtcMarket | null> {
         try {
-            // Получаем список рынков
-            const markets = await this.client.getMarkets();
+            // getMarkets возвращает PaginationPayload с полями data и next_cursor
+            const response = await this.client.getMarkets();
+            const markets:  any[] = (response as any).data || [];
 
-            // Ищем рынок "Bitcoin Up or Down - 15 minute"
             for (const market of markets) {
-                const question = market.question?. toLowerCase() || "";
+                const question = (market.question || "").toLowerCase();
                 if (
                     question.includes("bitcoin") &&
                     question. includes("15") &&
@@ -196,8 +186,8 @@ class PolymarketService {
                 ) {
                     return {
                         conditionId: market.condition_id,
-                        question: market.question,
-                        tokens: market. tokens || [],
+                        question: market. question,
+                        tokens: market.tokens || [],
                         tickSize: market.minimum_tick_size || "0.01",
                         negRisk: market.neg_risk || false,
                     };
@@ -210,17 +200,10 @@ class PolymarketService {
         }
     }
 
-    async getOrderBook(tokenId: string): Promise<{
-        bids:  Array<{ price: string; size: string }>;
-        asks: Array<{ price: string; size:  string }>;
-    }> {
-        return await this.client. getOrderBook(tokenId);
-    }
-
     async getMarketPrice(tokenId: string): Promise<number> {
         try {
             const midpoint = await this.client.getMidpoint(tokenId);
-            return parseFloat(midpoint?. mid || "0.5");
+            return parseFloat((midpoint as any)?. mid || "0.5");
         } catch {
             return 0. 5;
         }
@@ -252,9 +235,9 @@ class PolymarketService {
                     tickSize: tickSize as any,
                     negRisk: negRisk 
                 },
-                OrderType. GTC,
-                false, // deferExec
-                false  // postOnly
+                OrderType.GTC,
+                false,
+                false
             );
 
             console.log(`✅ Ордер размещён: `, response);
@@ -286,7 +269,7 @@ interface ArbitrageOpportunity {
     recommendedPrice: number;
     size: number;
     tickSize: string;
-    negRisk:  boolean;
+    negRisk: boolean;
 }
 
 class ArbitrageStrategy {
@@ -300,45 +283,38 @@ class ArbitrageStrategy {
         const threshold = this.config.momentumThresholdPercent;
 
         if (momentum > threshold) {
-            // Сильный восходящий тренд
             const prob = Math.min(0.85, 0.55 + (momentum / threshold) * 0.15);
             return { prob, direction: "UP" };
         } else if (momentum < -threshold) {
-            // Сильный нисходящий тренд
             const prob = Math.min(0.85, 0.55 + (Math.abs(momentum) / threshold) * 0.15);
             return { prob, direction: "DOWN" };
         } else {
-            // Нет чёткого сигнала
             return { prob: 0.5, direction: "NEUTRAL" };
         }
     }
 
     async findOpportunity(): Promise<ArbitrageOpportunity | null> {
-        // 1. Получаем моментум с Binance
         const momentum = this.priceFeed.calculateMomentum(
-            this.config.momentumWindowSeconds
+            this.config. momentumWindowSeconds
         );
 
         if (momentum === null) {
             return null;
         }
 
-        // 2. Рассчитываем реальную вероятность
         const { prob:  realProb, direction } = this.calculateRealProbability(momentum);
 
         if (direction === "NEUTRAL") {
             return null;
         }
 
-        // 3. Находим рынок BTC 15-min
         const market = await this.polymarket.findBtc15MinMarket();
         if (!market) {
             console.log("⚠️ Рынок BTC 15-min не найден");
             return null;
         }
 
-        // 4. Находим нужный токен (UP или DOWN)
-        const targetToken = market.tokens.find(t => 
+        const targetToken = market.tokens. find(t => 
             t.outcome. toLowerCase().includes(direction.toLowerCase())
         );
 
@@ -346,25 +322,23 @@ class ArbitrageStrategy {
             return null;
         }
 
-        // 5. Получаем текущую рыночную цену
-        const marketProb = await this. polymarket.getMarketPrice(targetToken. token_id);
+        const marketProb = await this.polymarket. getMarketPrice(targetToken.token_id);
 
-        // 6. Рассчитываем edge
         const edge = (realProb - marketProb) * 100;
 
         console.log(`
         === Анализ ===
-        BTC моментум: ${momentum. toFixed(4)}%
+        BTC моментум: ${momentum.toFixed(4)}%
         Направление: ${direction}
         Реальная вероятность: ${(realProb * 100).toFixed(2)}%
         Рыночная вероятность: ${(marketProb * 100).toFixed(2)}%
         Edge: ${edge.toFixed(2)}%
         `);
 
-        if (edge >= this. config.minEdgePercent) {
+        if (edge >= this.config.minEdgePercent) {
             return {
                 direction,
-                tokenId: targetToken. token_id,
+                tokenId: targetToken.token_id,
                 realProbability: realProb,
                 marketProbability: marketProb,
                 edge,
@@ -414,18 +388,16 @@ class ArbitrageBot {
 ╚══════════════════════════════════════════════════════════════╝
         `);
 
-        // Подключаемся к сервисам
         await this.priceFeed.connect();
         await this.polymarket.initialize();
 
-        // Ждём накопления данных о ценах
         console.log("⏳ Накапливаем данные о ценах (35 секунд)...");
         await this.sleep(35000);
 
         console.log("🚀 Бот запущен!  Ищем арбитражные возможности.. .\n");
 
         this.running = true;
-        await this.mainLoop();
+        await this. mainLoop();
     }
 
     private async mainLoop(): Promise<void> {
@@ -434,28 +406,26 @@ class ArbitrageBot {
                 const currentPrice = this.priceFeed.getCurrentPrice();
                 if (currentPrice) {
                     process.stdout.write(
-                        `\r💰 BTC:  $${currentPrice. toFixed(2)} | ` +
+                        `\r💰 BTC:  $${currentPrice.toFixed(2)} | ` +
                         `📊 Сделок: ${this.stats.trades} | ` +
                         `🎯 Возможностей: ${this. stats.opportunities}`
                     );
                 }
 
-                // Проверяем cooldown
                 const timeSinceLastTrade = (Date.now() - this.lastTradeTime) / 1000;
-                if (timeSinceLastTrade < this.config.cooldownSeconds) {
+                if (timeSinceLastTrade < this.config.cooldownSeconds && this.lastTradeTime > 0) {
                     await this.sleep(1000);
                     continue;
                 }
 
-                // Ищем арбитражную возможность
                 const opportunity = await this. strategy.findOpportunity();
 
                 if (opportunity) {
                     this.stats.opportunities++;
                     console.log(`\n\n🎯 НАЙДЕНА ВОЗМОЖНОСТЬ! `);
                     console.log(`   Направление: ${opportunity.direction}`);
-                    console. log(`   Edge: ${opportunity.edge. toFixed(2)}%`);
-                    console.log(`   Размер: $${opportunity.size}`);
+                    console. log(`   Edge: ${opportunity.edge.toFixed(2)}%`);
+                    console.log(`   Размер:  $${opportunity.size}`);
 
                     // РАСКОММЕНТИРУЙТЕ ДЛЯ РЕАЛЬНОЙ ТОРГОВЛИ: 
                     /*
@@ -464,7 +434,7 @@ class ArbitrageBot {
                         opportunity.direction,
                         opportunity. recommendedPrice,
                         opportunity.size,
-                        opportunity.tickSize,
+                        opportunity. tickSize,
                         opportunity.negRisk
                     );
                     
@@ -472,10 +442,10 @@ class ArbitrageBot {
                     this. lastTradeTime = Date.now();
                     */
 
-                    console.log("   ⚠️ Симуляция - ордер НЕ размещён (раскомментируйте код для реальной торговли)\n");
+                    console.log("   ⚠️ Симуляция - ордер НЕ размещён\n");
                 }
 
-                await this.sleep(1000);
+                await this. sleep(1000);
             } catch (error) {
                 console.error("\n❌ Ошибка в главном цикле:", error);
                 await this.sleep(5000);
@@ -495,10 +465,10 @@ class ArbitrageBot {
         console.log(`
 ╔══════════════════════════════════════════════════════════════╗
 ║                      📊 СТАТИСТИКА                           ║
-╠══════════════════════════════════════════════════════════���═══╣
-║  Время работы: ${runtime.toFixed(1)} минут
-║  Всего сделок:  ${this.stats. trades}
-║  Найдено возможностей:  ${this.stats. opportunities}
+╠══════════════════════════════════════════════════════════════╣
+║  Время работы: ${runtime. toFixed(1)} минут
+║  Всего сделок: ${this.stats.trades}
+║  Найдено возможностей: ${this. stats.opportunities}
 ╚══════════════════════════════════════════════════════════════╝
         `);
     }
@@ -511,9 +481,8 @@ class ArbitrageBot {
 // ============== ЗАПУСК ==============
 
 async function main() {
-    const bot = new ArbitrageBot(config);
+    const bot = new ArbitrageBot(botConfig);
 
-    // Обработка Ctrl+C
     process.on("SIGINT", () => {
         bot.stop();
         process.exit(0);
