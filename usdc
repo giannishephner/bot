@@ -1,0 +1,9 @@
+node -e "
+const { Wallet } = require('@ethersproject/wallet');
+const w = Wallet.createRandom();
+console.log('\n🆕 Новый кошелёк для вывода:\n');
+console.log('Адрес:', w. address);
+console.log('Приватный ключ:', w.privateKey);
+console.log('\n→ Выведите USDC на этот адрес через polymarket.com');
+console.log('→ Затем обновите .env с новыми данными');
+"
